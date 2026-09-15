@@ -416,6 +416,7 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
   type Invite = { did:string; role:"organizer"|"voter"; inviterDid:string; inviteeDid:string; requestId:string; seq?:number; ts?:string; };
   type Reply = { did:string; requestId:string; action:"accept"|"decline"; seq?:number; ts?:string; };
   type Ballot = { did:string; gameId:string; poemRoom:string; vote:"win"|"lose"; requestId:string; seq?:number; ts?:string; };
+  type ChatMessage = { did:string; text:string; requestId:string; seq?:number; ts?:string; };
   type TeamRequest = { gameId:string; did:string; requestId:string; seq?:number; ts?:string; poemRoom?:string; roomGeneration?:number; };
   type RosterMember = { did:string; role:"writer" };
   type RosterRecord = { did:string; requestId:string; gameId:string; poemRoom:string; roomGeneration:number; members:RosterMember[]; seq?:number; ts?:string; };
@@ -429,7 +430,7 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
     rosterMembers?:RosterMember[]; rosterConsents?:string[];
     rosterStatus?:"none"|"proposed"|"ready"|"frozen";
     turns?:AcceptedWord[]; pendingTurns?:WordProposal[]; lastReceipt?:Receipt|null;
-    invites?:Invite[]; replies?:Reply[]; ballots?:Ballot[]; claimStatus?:"none"|"pending"|"claimed";
+    invites?:Invite[]; replies?:Reply[]; ballots?:Ballot[]; claimStatus?:"none"|"pending"|"claimed"; chatMessages?:ChatMessage[];
   };
   type PersonalCache = {
     version:number; savedAt:string; xUsername?:string; gameId?:string;
@@ -446,6 +447,9 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
   const [activeTab,setActiveTab]=useState<"writer"|"organizer"|"voter">("writer");
   const [inviteTargetDid,setInviteTargetDid]=useState("");
   const [inviteRole,setInviteRole]=useState<"organizer"|"voter">("voter");
+  const [chatMessages,setChatMessages]=useState<ChatMessage[]>([]);
+  const [chatInput,setChatInput]=useState("");
+  const [chatSending,setChatSending]=useState(false);
   const [xUsername,setXUsername]=useState("");
   const [registeredWriters,setRegisteredWriters]=useState<Registration[]>([]);
   const [teamGameId,setTeamGameId]=useState(DEFAULT_GAME_ID);
@@ -474,6 +478,7 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
   const [xPostIds,setXPostIds]=useState("");
   const [lastSyncAt,setLastSyncAt]=useState("");
   const syncCounter = useRef(0);
+  const campaignPolling = useRef(false);
 
   const personalKey=(did:string)=>`sonnet2:personal:v${PERSONAL_CACHE_VERSION}:${did}`;
   const teamKey=(game:string)=>`sonnet2:team:v${TEAM_CACHE_VERSION}:${game}`;
@@ -576,12 +581,15 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
   function parseReplies(records:Message[]):Reply[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m);const action=p?.action,requestId=typeof p?.request_id==="string"?p.request_id:"";if(!m.text||p?.type!=="sonnet.reply.v1"||p?.contest_id!==CONTEST_ID||!did||!["accept","decline"].includes(action)||!requestId)return [];return [{did,requestId,action,seq:m.seq,ts:m.ts}];}).sort((a,b)=>(a.seq??0)-(b.seq??0));}
   // sonnet.ballot.v1: a registered voter casts a win/lose vote for a finished poem room.
   function parseBallots(records:Message[]):Ballot[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m);const vote=p?.vote,gameId=typeof p?.game_id==="string"?p.game_id:"",poemRoomV=typeof p?.poem_room==="string"?p.poem_room:"",requestId=typeof p?.request_id==="string"?p.request_id:"";if(!m.text||p?.type!=="sonnet.ballot.v1"||p?.contest_id!==CONTEST_ID||!did||!["win","lose"].includes(vote)||!gameId||!poemRoomV||!requestId)return [];return [{did,gameId,poemRoom:poemRoomV,vote,requestId,seq:m.seq,ts:m.ts}];}).sort((a,b)=>(a.seq??0)-(b.seq??0));}
+  // sonnet.chat.v1: free-form discussion in the shared campaign room. Not part of the
+  // official contest protocol receipts — just a signed, readable note between participants.
+  function parseChatMessages(records:Message[]):ChatMessage[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m);const body=typeof p?.message==="string"?p.message:"",requestId=typeof p?.request_id==="string"?p.request_id:"";if(!m.text||p?.type!=="sonnet.chat.v1"||p?.contest_id!==CONTEST_ID||!did||!body||!requestId)return [];return [{did,text:body.slice(0,500),requestId,seq:m.seq,ts:m.ts}];}).sort((a,b)=>(a.seq??0)-(b.seq??0));}
   function parseTeamRequests(records:Message[]):TeamRequest[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m);if(!m.text||p?.type!=="sonnet.team-request.v1"||p?.contest_id!==CONTEST_ID||!did)return [];const gameId=typeof p.game_id==="string"?p.game_id:"",requestId=typeof p.request_id==="string"?p.request_id:"";return gameId&&requestId?[{did,gameId,requestId,seq:m.seq,ts:m.ts}]:[];}).sort((a,b)=>(a.seq??0)-(b.seq??0));}
   function parseRosterMessages(records:Message[]):RosterRecord[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m);if(!m.text||p?.type!=="sonnet.roster.v1"||p?.contest_id!==CONTEST_ID||!did)return [];const gameId=typeof p.game_id==="string"?p.game_id:"",poemRoom=typeof p.poem_room==="string"?p.poem_room:"",requestId=typeof p.request_id==="string"?p.request_id:"",roomGeneration=Number.isInteger(p.room_generation)?p.room_generation:-1,members=membersFrom(p.members);if(!gameId||!poemRoom||!requestId||roomGeneration<0||members.length<4||members.length>8)return [];const unique=new Set(members.map(m=>m.did));return unique.size===members.length?[{did,requestId,gameId,poemRoom,roomGeneration,members,seq:m.seq,ts:m.ts}]:[];}).sort((a,b)=>(a.seq??0)-(b.seq??0));}
   function parseWordMessages(records:Message[]):WordProposal[]{return records.flatMap(m=>{const p=parsePayload(m),did=messageDid(m),sig=messageSig(m);if(!m.text||p?.type!=="sonnet.word.v1"||p?.contest_id!==CONTEST_ID||!did||!sig||m.nonce==null||typeof p.word!=="string")return [];return [{seq:m.seq,ts:m.ts,did,word:p.word,nonce:String(m.nonce),sig,text:m.text,requestId:typeof p.request_id==="string"?p.request_id:"",version:Number.isInteger(p.version)?p.version:0,roomGeneration:Number.isInteger(p.room_generation)?p.room_generation:0,previousStateHash:typeof p.previous_state_hash==="string"?p.previous_state_hash:""}];}).filter(x=>!!x.requestId).sort((a,b)=>(a.seq??0)-(b.seq??0));}
   function classifyWords(words:WordProposal[],receipts:Receipt[],members:RosterMember[]){const allowed=new Set(members.map(m=>m.did));const byReq=new Map<string,Receipt>();for(const r of receipts)byReq.set(r.requestId,r);const accepted=words.filter(w=>allowed.has(w.did)&&byReq.get(w.requestId)?.accepted).map(w=>({w,r:byReq.get(w.requestId)!})).sort((a,b)=>(a.r.seq??0)-(b.r.seq??0)).map((x,i)=>({...x.w,turn:i+1,receiptSeq:x.r.seq,acceptedReceipt:x.r}));const pending=words.filter(w=>allowed.has(w.did)&&!byReq.has(w.requestId));const rejected=words.filter(w=>allowed.has(w.did)&&!!byReq.get(w.requestId)&&!byReq.get(w.requestId)!.accepted);return {accepted,pending,rejected};}
 
-  function applyTeamCache(c:TeamCache|null){if(!c)return;if(c.teamRequest!==undefined)setTeamRequest(c.teamRequest||null);if(c.teamRequesterDid!==undefined)setTeamOwnerDid(c.teamRequesterDid||"");if(c.poemRoom!==undefined)setPoemRoom(c.poemRoom||"");if(Number.isInteger(c.roomGeneration))setRoomGeneration(c.roomGeneration||0);if(Array.isArray(c.rosterMembers))setRosterMembers(c.rosterMembers);if(Array.isArray(c.rosterConsents))setRosterConsents(c.rosterConsents);if(c.rosterStatus)setRosterStatus(c.rosterStatus);if(Array.isArray(c.turns))setTurns(c.turns);if(Array.isArray(c.pendingTurns))setPendingTurns(c.pendingTurns);if(c.lastReceipt!==undefined)setLastReceipt(c.lastReceipt||null);if(Array.isArray(c.invites))setInvites(c.invites);if(Array.isArray(c.replies))setReplies(c.replies);if(Array.isArray(c.ballots))setBallots(c.ballots);if(c.claimStatus)setClaimStatus(c.claimStatus);}
+  function applyTeamCache(c:TeamCache|null){if(!c)return;if(c.teamRequest!==undefined)setTeamRequest(c.teamRequest||null);if(c.teamRequesterDid!==undefined)setTeamOwnerDid(c.teamRequesterDid||"");if(c.poemRoom!==undefined)setPoemRoom(c.poemRoom||"");if(Number.isInteger(c.roomGeneration))setRoomGeneration(c.roomGeneration||0);if(Array.isArray(c.rosterMembers))setRosterMembers(c.rosterMembers);if(Array.isArray(c.rosterConsents))setRosterConsents(c.rosterConsents);if(c.rosterStatus)setRosterStatus(c.rosterStatus);if(Array.isArray(c.turns))setTurns(c.turns);if(Array.isArray(c.pendingTurns))setPendingTurns(c.pendingTurns);if(c.lastReceipt!==undefined)setLastReceipt(c.lastReceipt||null);if(Array.isArray(c.invites))setInvites(c.invites);if(Array.isArray(c.replies))setReplies(c.replies);if(Array.isArray(c.ballots))setBallots(c.ballots);if(c.claimStatus)setClaimStatus(c.claimStatus);if(Array.isArray(c.chatMessages))setChatMessages(c.chatMessages);}
 
   async function syncState(showMessage=true){
     if(!identity)return;
@@ -597,7 +605,7 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
       try{discoveryRecords=await readProtocolRoom(DISCOVERY_ROOM);}catch(e){if(showMessage)setMessage(`Discovery refresh failed. ${String(e).replace(/^Error:\s*/,"")} Last known team state kept.`);}
       try{campaignRecords=await readProtocolRoom(CAMPAIGN_ROOM);}catch{}
       if(run!==syncCounter.current)return;
-      if(campaignRecords){const nextInvites=parseInvites(campaignRecords),nextReplies=parseReplies(campaignRecords),nextBallots=parseBallots(campaignRecords);setInvites(nextInvites);setReplies(nextReplies);setBallots(nextBallots);writeTeam(game,{invites:nextInvites,replies:nextReplies,ballots:nextBallots});}
+      if(campaignRecords){const nextInvites=parseInvites(campaignRecords),nextReplies=parseReplies(campaignRecords),nextBallots=parseBallots(campaignRecords),nextChat=parseChatMessages(campaignRecords);setInvites(nextInvites);setReplies(nextReplies);setBallots(nextBallots);setChatMessages(nextChat);writeTeam(game,{invites:nextInvites,replies:nextReplies,ballots:nextBallots,chatMessages:nextChat});}
 
       if(registrationRecords){
         const registrationMessages=parseRegistrationMessages(registrationRecords);
@@ -686,6 +694,34 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
     setInitializing(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[identity?.did]);
+
+  // Lightweight poll of just the campaign room (invites, replies, ballots, chat) so new
+  // messages from other participants show up without the user pressing Refresh state.
+  // Kept separate from syncState, which also re-reads the (much larger) discovery/poem
+  // rooms and would be too heavy to run every few seconds.
+  async function pollCampaign(){
+    if(!identity||campaignPolling.current||!navigator.onLine)return;
+    campaignPolling.current=true;
+    try{
+      const records=await readProtocolRoom(CAMPAIGN_ROOM);
+      const nextInvites=parseInvites(records),nextReplies=parseReplies(records),nextBallots=parseBallots(records),nextChat=parseChatMessages(records);
+      setInvites(nextInvites);setReplies(nextReplies);setBallots(nextBallots);setChatMessages(nextChat);
+      writeTeam(teamGameId.trim().toLowerCase(),{invites:nextInvites,replies:nextReplies,ballots:nextBallots,chatMessages:nextChat});
+    }catch{
+      // Silent: this runs in the background every few seconds, so a transient
+      // network hiccup shouldn't interrupt the user with a toast every time.
+    }finally{campaignPolling.current=false;}
+  }
+
+  useEffect(()=>{
+    if(!identity?.did)return;
+    pollCampaign();
+    const id=window.setInterval(()=>{ if(document.visibilityState==="visible") pollCampaign(); },4000);
+    const onVisible=()=>{ if(document.visibilityState==="visible") pollCampaign(); };
+    document.addEventListener("visibilitychange",onVisible);
+    return ()=>{ window.clearInterval(id); document.removeEventListener("visibilitychange",onVisible); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[identity?.did,teamGameId]);
 
   async function registerWriter(){
     if(!identity)return;
@@ -881,6 +917,21 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
 
   // Stable handler aliases kept outside JSX so TypeScript resolves all button callbacks.
   // sonnet.invite.v1 — any registered participant may invite a DID to join as organizer or voter.
+  // sonnet.chat.v1 — free-form discussion note in the shared campaign room. Anyone with an
+  // identity can post; there is no referee receipt for this, it's just signed and readable.
+  async function sendChatMessage(){
+    if(!identity){setMessage("Create or import an identity first.");return;}
+    const body=chatInput.trim();
+    if(!body){setMessage("Write something to post.");return;}
+    if(!online){setMessage("Offline. Chat requires a connection.");return;}
+    setChatSending(true);setMessage("");
+    try{
+      const requestId=`chat-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;const nonce=String(Date.now());
+      const text=JSON.stringify({type:"sonnet.chat.v1",contest_id:CONTEST_ID,message:body.slice(0,500),request_id:requestId});
+      const sig=await signMessage(identity,CAMPAIGN_ROOM,nonce,text);await postSigned(CAMPAIGN_ROOM,{did:identity.did,sig,nonce,text});
+      setChatMessages(prev=>[...prev,{did:identity.did,text:body.slice(0,500),requestId}]);setChatInput("");
+    }catch(e){setMessage(String(e).replace(/^Error:\s*/,""));}finally{setChatSending(false);}
+  }
   async function sendInvite(){
     if(!identity){setMessage("Create or import an identity first.");return;}
     const target=inviteTargetDid.trim();
@@ -1042,6 +1093,15 @@ function SonnetView({identity,room,onOpenRoom}:{identity:Identity|null;room:stri
           const reply=replies.find(r=>r.requestId===i.requestId&&r.did===identity?.did);
           return <div key={i.requestId} className="sonnet-roster-item"><div className="sonnet-roster-main"><div><div className="sonnet-roster-name">Invited as {i.role}</div><div className="mono sonnet-writer-did">from {i.inviterDid}</div></div></div>{reply?pill(reply.action==="accept"?"ok":"warn",reply.action.toUpperCase()):<div className="sonnet-form-row"><button className="sonnet-btn primary small-btn" type="button" onClick={()=>void replyToInvite(i.requestId,"accept")} disabled={busy}>Accept</button><button className="sonnet-btn secondary small-btn" type="button" onClick={()=>void replyToInvite(i.requestId,"decline")} disabled={busy}>Decline</button></div>}</div>;
         }):<div className="sonnet-empty">No invites addressed to your DID yet.</div>}
+      </div>
+      <div className="sonnet-divider"/>
+      <div className="sonnet-list-head"><div><div className="sonnet-panel-title">CAMPAIGN DISCUSSION</div><div className="sonnet-muted-line">Free-form, signed notes visible to everyone reading this room. Not part of the referee protocol.</div></div><span className="sonnet-count-badge">{chatMessages.length}</span></div>
+      <div className="sonnet-chat-list">
+        {chatMessages.length?chatMessages.slice(-40).map(c=><div className="sonnet-chat-row" key={c.requestId}><div className="sonnet-chat-head"><span className="mono sonnet-chat-author">{nameForDid(c.did)}</span>{c.did===identity?.did&&<span className="sonnet-chat-you">you</span>}</div><div className="sonnet-chat-body">{c.text}</div></div>):<div className="sonnet-empty">No messages yet. Say hello to your organizers and voters.</div>}
+      </div>
+      <div className="sonnet-form-row">
+        <input className="sonnet-input" value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void sendChatMessage();}} placeholder="Write a message to the campaign room…" maxLength={500} disabled={chatSending}/>
+        <button className="sonnet-btn primary" type="button" onClick={()=>void sendChatMessage()} disabled={chatSending||!online||!identity}><Send size={13}/> {chatSending?"Sending…":"Post"}</button>
       </div>
     </section>}
 

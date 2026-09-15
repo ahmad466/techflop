@@ -225,7 +225,7 @@ main { padding: 42px clamp(22px, 5vw, 72px); max-width: 1500px; width:100%; marg
   border: 1px solid var(--sonnet-line);
   border-radius: 16px;
   padding: 16px;
-  background: linear-gradient(180deg, rgba(243, 224, 214, 0.97), rgba(234, 216, 204, 0.97));
+  background: linear-gradient(180deg, rgba(249, 233, 211, 0.97), rgba(241, 224, 202, 0.97));
   box-shadow: 0 10px 30px rgba(4, 10, 15, .08);
   margin-bottom: 12px;
 }
@@ -670,3 +670,11 @@ main { padding: 42px clamp(22px, 5vw, 72px); max-width: 1500px; width:100%; marg
 .sonnet-tabs { display:flex; gap:6px; }
 .sonnet-tab { flex:1; display:flex; align-items:center; justify-content:center; gap:6px; padding:9px 10px; border-radius:8px; border:1px solid var(--line,#e3ddd0); background:transparent; font-size:12px; font-weight:600; cursor:pointer; color:var(--ink-muted,#6b6b6b); }
 .sonnet-tab.active { background:var(--ink,#1a1a1a); color:#fff; border-color:var(--ink,#1a1a1a); }
+
+/* Campaign discussion chat (redesign addition) */
+.sonnet-chat-list { display:flex; flex-direction:column; gap:8px; max-height:280px; overflow-y:auto; margin-bottom:12px; }
+.sonnet-chat-row { padding:10px 12px; border-radius:8px; background:rgba(0,0,0,0.03); }
+.sonnet-chat-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+.sonnet-chat-author { font-size:11px; color:var(--ink-muted,#6b6b6b); }
+.sonnet-chat-you { font-size:10px; padding:1px 6px; border-radius:99px; background:var(--ink,#1a1a1a); color:#fff; }
+.sonnet-chat-body { font-size:13px; line-height:1.5; color:var(--ink,#1a1a1a); word-break:break-word; }
